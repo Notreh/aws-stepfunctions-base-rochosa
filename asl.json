@@ -1,0 +1,125 @@
+{
+  "Comment": "Máquina de estados que lê mensagens do DynamoDB, processa com o Amazon Bedrock e encadeia as respostas, truncando o histórico da conversa usando uma função Lambda.",
+  "StartAt": "Seed the DynamoDB Table",
+  "TimeoutSeconds": 3600,
+  "States": {
+    "Seed the DynamoDB Table": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "MyLambdaFunction"
+      },
+      "ResultPath": "$.List",
+      "Next": "Initialize Conversation History"
+    },
+    "Initialize Conversation History": {
+      "Type": "Pass",
+      "Result": "",
+      "ResultPath": "$.ConversationHistory",
+      "Next": "For Loop Condition"
+    },
+    "For Loop Condition": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Not": {
+            "Variable": "$.List[0]",
+            "StringEquals": "DONE"
+          },
+          "Next": "Read Next Message from DynamoDB"
+        }
+      ],
+      "Default": "Succeed"
+    },
+    "Read Next Message from DynamoDB": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:getItem",
+      "Parameters": {
+        "TableName": "<NOME_DA_TABELA_DYNAMODB>",
+        "Key": {
+          "MessageId": {
+            "S.$": "$.List[0]"
+          }
+        }
+      },
+      "ResultPath": "$.DynamoDB",
+      "Next": "Update Conversation History with Message"
+    },
+    "Update Conversation History with Message": {
+      "Type": "Pass",
+      "Parameters": {
+        "ConversationHistory.$": "States.Format('{}\n{}', $.ConversationHistory, $.DynamoDB.Item.Message.S)"
+      },
+      "ResultPath": "$.ConversationHistory",
+      "Next": "Truncate Conversation History"
+    },
+    "Truncate Conversation History": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "TruncateHistoryFunction",
+        "Payload": {
+          "ConversationHistory.$": "$.ConversationHistory",
+          "MaxLength": 2000
+        }
+      },
+      "ResultSelector": {
+        "ConversationHistory.$": "$.Payload.ConversationHistory"
+      },
+      "ResultPath": "$.ConversationHistory",
+      "Next": "Invoke Model with Message"
+    },
+    "Invoke Model with Message": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::bedrock:invokeModel",
+      "Parameters": {
+        "ModelId": "cohere.command-text-v14",
+        "Body": {
+          "prompt.$": "$.ConversationHistory",
+          "max_tokens": 250
+        },
+        "ContentType": "application/json",
+        "Accept": "*/*"
+      },
+      "ResultSelector": {
+        "ModelResponse.$": "$.Body.generations[0].text"
+      },
+      "ResultPath": "$.ModelResult",
+      "Next": "Update Conversation History with Response"
+    },
+    "Update Conversation History with Response": {
+      "Type": "Pass",
+      "Parameters": {
+        "ConversationHistory.$": "States.Format('{}\n{}', $.ConversationHistory, $.ModelResult.ModelResponse)"
+      },
+      "ResultPath": "$.ConversationHistory",
+      "Next": "Truncate Conversation History After Response"
+    },
+    "Truncate Conversation History After Response": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "TruncateHistoryFunction",
+        "Payload": {
+          "ConversationHistory.$": "$.ConversationHistory",
+          "MaxLength": 2000
+        }
+      },
+      "ResultSelector": {
+        "ConversationHistory.$": "$.Payload.ConversationHistory"
+      },
+      "ResultPath": "$.ConversationHistory",
+      "Next": "Pop Element from List"
+    },
+    "Pop Element from List": {
+      "Type": "Pass",
+      "Parameters": {
+        "List.$": "$.List[1:]"
+      },
+      "Next": "For Loop Condition"
+    },
+    "Succeed": {
+      "Type": "Succeed"
+    }
+  }
+}
